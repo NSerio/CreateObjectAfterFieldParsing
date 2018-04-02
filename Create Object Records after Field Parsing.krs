@@ -1,0 +1,540 @@
+<script>
+	<name>Create Object Records after Field Parsing</name>
+	<version>4.4</version>
+	<description>This Relativity workspace script will take one or many document text fields which contain a delimited list of values and create unique records in a custom object which are created are associated to the documents.  Also reports any documents with email addresses that exceed the character limit for the destination field and skips them. KCD_1040822</description>
+	<category>Case Functionality</category>
+	<input>
+		<search id="searchId" name="Saved Search:" />
+		<field id="field1" name="Field 1:">
+			<filters>
+				<type>0</type>
+				<type>4</type>
+				<category>0</category>
+			</filters>
+		</field>
+		<field id="field2" name="Field 2:" required="false">
+			<filters>
+				<type>0</type>
+				<type>4</type>
+				<category>0</category>
+			</filters>
+		</field>
+		<field id="field3" name="Field 3:" required="false">
+			<filters>
+				<type>0</type>
+				<type>4</type>
+				<category>0</category>
+			</filters>
+		</field>
+		<field id="field4" name="Field 4:" required="false">
+			<filters>
+				<type>0</type>
+				<type>4</type>
+				<category>0</category>
+			</filters>
+		</field>
+		<constant id="delimiter" name="Delimiter:" type="text" />
+		<sql id="fieldToPopulate" name="Object Type:: Field to Populate:">
+			SELECT 
+				Display = OT.Name + ':: ' + F.DisplayName
+				,ID = F.ArtifactID
+			FROM [Field] F (NOLOCK)
+			INNER JOIN ArtifactType AT (NOLOCK) ON F.FieldArtifactTypeID = AT.ArtifactTypeID
+			INNER JOIN ObjectType OT (NOLOCK) ON AT.ArtifactTypeID = OT.DescriptorArtifactTypeID
+			WHERE F.FieldTypeID = 0
+				AND F.FieldArtifactTypeID != 10 --Document
+				AND F.IsEditable = 1
+				AND OT.IsSystem = 0
+			ORDER BY AT.ArtifactType, F.DisplayName
+		</sql>
+		<sql id="iWhole" name="Object Type:: Count Field:" required="false">
+			SELECT 
+				Display = OT.Name + ':: ' + F.DisplayName
+				,ID = F.ArtifactID
+			 FROM [Field] F (NOLOCK)
+				INNER JOIN ArtifactType AT (NOLOCK) ON F.FieldArtifactTypeID = AT.ArtifactTypeID
+				INNER JOIN ObjectType OT (NOLOCK) ON AT.ArtifactTypeID = OT.DescriptorArtifactTypeID
+			 WHERE F.FieldTypeID = 1
+				AND F.FieldArtifactTypeID != 10 --Document
+				AND F.IsEditable = 1
+				AND OT.IsSystem = 0
+			 ORDER BY AT.ArtifactType, F.DisplayName
+		</sql>
+	</input>
+	<action returns="table" timeout="1200"><![CDATA[
+   --]
+   
+   /*
+   Updated By: ALEX BILSON
+   Updated On: 5/22/2015
+   Description: The original versions of this script (<3.0) would only make updates to Email Address RDOs and associated Documents 
+   for RDO that did not exist and were considered new.  This version of the script updates the document count and associated 
+   Documents for Email Address RDO records that already existed prior to running this script.  Please bear in mind that this will 
+   only be reflective of the documents in the selected Saved Search, not the entire document set in the workspace.
+   */
+   
+   /*
+	Updated By:		Erik Naujokas
+	Updated On:		5/4/2015
+	Description:	The original versions of this script (<3.0) would only make updates to Email Address RDOs and associated Documents for RDO that did not exist and
+					were considered new.  This version of the script updates the document count and associated Documents for Email Address RDO records that already 
+					existed prior to running this script.  Please bear in mind that this will only be reflective of the documents in the selected Saved Search, not the 
+					entire document set in the workspace.
+	*/
+	
+   --Added by SVempati
+   --Make sure both inputs are pointing to same object
+   
+   --Added by abilson
+   -- updating email fields to nvarchar for unicode support also halves their maximum size
+
+   DECLARE @PopulateCount AS INT
+   DECLARE @iWhole AS NVARCHAR(10)
+   
+   IF '#iWhole#' = '' 
+   BEGIN 
+      SET @PopulateCount = 0 
+      SET @iWhole = 0
+   END
+   ELSE BEGIN 
+      SET @PopulateCount = 1
+      SET @iWhole = '#iWhole#'   
+   END
+   
+   IF @PopulateCount = 1 
+   BEGIN
+		-- ACB: Gets selected field to populate from client's rdo
+      DECLARE @PopulateFieldObject INT SET @PopulateFieldObject = 
+         (SELECT OT.[ArtifactID]
+            FROM [Field] F WITH (NOLOCK)
+            INNER JOIN ObjectType OT WITH (NOLOCK) ON F.FieldArtifactTypeID = OT.DescriptorArtifactTypeID
+         WHERE F.[ArtifactID] = #fieldToPopulate#)
+		 
+		-- ACB: Gets selected count field from client's rdo
+      DECLARE @CountFieldObject INT SET @CountFieldObject = 
+         (SELECT OT.[ArtifactID]
+            FROM [Field] F WITH (NOLOCK)
+            INNER JOIN ObjectType OT WITH (NOLOCK) ON F.FieldArtifactTypeID = OT.DescriptorArtifactTypeID
+         WHERE F.[ArtifactID] = CAST(@iWhole AS INT))
+		 
+         -- ACB: Ensures both fields are members of the same object
+      IF @PopulateFieldObject != @CountFieldObject
+      BEGIN
+         GOTO Error
+      END
+   END
+   
+--Create function to split the string by delimiter
+EXEC('
+IF NOT OBJECT_ID(''eddsdbo.KCD_1040822_SplitString'') IS NULL BEGIN
+   DROP FUNCTION eddsdbo.KCD_1040822_SplitString
+END
+')
+
+EXEC('
+--REFERENCE: http://www.sqlservercentral.com/articles/Tally+Table/72993/
+CREATE FUNCTION eddsdbo.KCD_1040822_SplitString
+        (@pString NVARCHAR(4000), @pDelimiter CHAR(1))
+--WARNING!!! DO NOT USE MAX DATA-TYPES HERE!  IT WILL KILL PERFORMANCE!
+RETURNS TABLE WITH SCHEMABINDING AS
+ RETURN
+--===== "Inline" CTE Driven "Tally Table" produces values from 1 up to 10,000...
+     -- enough to cover VARCHAR(8000) -- ACB: in this version, enough to cover NVARCHAR(4000)
+  WITH E1(N) AS (
+                 SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 1 UNION ALL
+                 SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 1 UNION ALL
+                 SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 1
+                ),                          --10E+1 or 10 rows
+       E2(N) AS (SELECT 1 FROM E1 a, E1 b), --10E+2 or 100 rows
+       E4(N) AS (SELECT 1 FROM E2 a, E2 b), --10E+4 or 10,000 rows max
+ cteTally(N) AS (--==== This provides the "base" CTE and limits the number of rows right up front
+                     -- for both a performance gain and prevention of accidental "overruns"
+                 SELECT TOP (ISNULL(DATALENGTH(@pString),0)) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) FROM E4
+                ),
+cteStart(N1) AS (--==== This returns N+1 (starting position of each "element" just once for each delimiter)
+                 SELECT 1 UNION ALL
+                 SELECT t.N+1 FROM cteTally t WHERE SUBSTRING(@pString,t.N,1) = @pDelimiter
+                ),
+cteLen(N1,L1) AS(--==== Return start and length (for use in substring)
+                 SELECT s.N1,
+                        ISNULL(NULLIF(CHARINDEX(@pDelimiter,@pString,s.N1),0)-s.N1,8000)
+                   FROM cteStart s
+                )
+--===== Do the actual split. The ISNULL/NULLIF combo handles the length for the final element when no delimiter is found.
+ SELECT ItemNumber = ROW_NUMBER() OVER(ORDER BY l.N1),
+        Item       = SUBSTRING(@pString, l.N1, l.L1)
+   FROM cteLen l
+;
+')
+
+--Setup variables
+DECLARE @batch INT 
+DECLARE @maxID INT
+DECLARE @rowsAffected INT
+DECLARE @totalRows INT
+DECLARE @artifactTypeID INT 
+DECLARE @parentArtifactID INT
+DECLARE @artifactTypeTableName VARCHAR(50)
+DECLARE @artifactTypeTableColumnName VARCHAR(100)
+DECLARE @columnName VARCHAR(100)
+DECLARE @SQL VARCHAR(MAX)
+DECLARE @objectFieldArtifactID INT
+DECLARE @tableName NVARCHAR(128)
+DECLARE @objectFieldColumnName NVARCHAR(128)
+DECLARE @documentFieldColumnName NVARCHAR(128)
+DECLARE @countFieldName NVARCHAR(255)
+DECLARE @result VARCHAR(MAX)
+
+--Get all documents in the saved search 
+IF NOT OBJECT_ID('eddsdbo.KCD_1040822_Documents') IS NULL BEGIN DROP TABLE eddsdbo.KCD_1040822_Documents END
+SELECT [Document].ArtifactID ArtifactID
+INTO eddsdbo.KCD_1040822_Documents
+#searchId#
+
+-- ACB: Adds index to improve performance
+CREATE CLUSTERED INDEX [KCD_1040822_Documents_c_16_1383957460__K1] ON [EDDSDBO].[KCD_1040822_Documents] 
+(
+   [ArtifactID] ASC
+)WITH (SORT_IN_TEMPDB = OFF, IGNORE_DUP_KEY = OFF, DROP_EXISTING = OFF, ONLINE = OFF) ON [PRIMARY]
+
+--Get all documents in the saved search and their field values
+DECLARE @field2Var VARCHAR(100) SET @field2Var = ISNULL(REPLACE('#field2#','[]',''),'')
+DECLARE @field3Var VARCHAR(100) SET @field3Var = ISNULL(REPLACE('#field3#','[]',''),'')
+DECLARE @field4Var VARCHAR(100) SET @field4Var = ISNULL(REPLACE('#field4#','[]',''),'')
+DECLARE @inDelimiter VARCHAR(100) SET @inDelimiter = #delimiter#
+
+IF NOT OBJECT_ID('eddsdbo.KCD_1040822_AllValues') IS NULL BEGIN DROP TABLE eddsdbo.KCD_1040822_AllValues END
+
+-- ACB: Table will include document artifact ID and all values concatenated into FieldValue
+CREATE TABLE eddsdbo.KCD_1040822_AllValues
+   (
+      ArtifactID INT
+      ,FieldValue NVARCHAR(MAX)
+   )
+   
+SET @SQL = '
+INSERT INTO eddsdbo.KCD_1040822_AllValues(ArtifactID,FieldValue)
+SELECT 
+   D.ArtifactID
+   ,ISNULL(D.#field1#,'''') 
+      'IF @field2Var != '' BEGIN SET @SQL = @SQL + '+ '''+@inDelimiter+''' +ISNULL(D.' + @field2Var + ','''') ' END
+      SET @SQL = @SQL + ' ' IF @field3Var != '' BEGIN SET @SQL = @SQL +  '+ '''+@inDelimiter+''' +ISNULL(D.' + @field3Var + ','''') ' END
+      SET @SQL = @SQL + ' ' IF @field4Var != '' BEGIN SET @SQL = @SQL +  '+ '''+@inDelimiter+''' +ISNULL(D.' + @field4Var + ','''') ' END
+      SET @SQL = @SQL + ' 
+FROM eddsdbo.KCD_1040822_Documents K
+   INNER JOIN eddsdbo.Document D ON K.ArtifactID = D.ArtifactID
+'
+EXEC(@SQL)
+
+CREATE CLUSTERED INDEX [KCD_1040822_AllValues_c_16_1415957574__K1] ON [EDDSDBO].[KCD_1040822_AllValues] 
+(
+   [ArtifactID] ASC
+)WITH (SORT_IN_TEMPDB = OFF, IGNORE_DUP_KEY = OFF, DROP_EXISTING = OFF, ONLINE = OFF) ON [PRIMARY]
+
+--Parse out strings from each field by delimiter
+IF NOT OBJECT_ID('eddsdbo.KCD_1040822_EmailAddressStaging') IS NULL BEGIN DROP TABLE eddsdbo.KCD_1040822_EmailAddressStaging END
+CREATE TABLE eddsdbo.KCD_1040822_EmailAddressStaging
+   (
+      EmailAddress NVARCHAR(4000)
+      ,DocumentArtifactID INT
+   )
+   
+--Create and populate the Tally table on the fly for the number of documents to loop through
+IF NOT OBJECT_ID('eddsdbo.KCD_1040822_Tally') IS NULL BEGIN DROP TABLE eddsdbo.KCD_1040822_Tally END
+ SELECT 
+    IDENTITY(INT,1,1) AS N
+    ,FieldValue
+    ,ArtifactID DocumentArtifactID
+INTO eddsdbo.KCD_1040822_Tally
+FROM eddsdbo.KCD_1040822_AllValues
+
+--Add a Primary Key to maximize performance
+ALTER TABLE eddsdbo.KCD_1040822_Tally
+   ADD CONSTRAINT PK_Tally_N 
+    PRIMARY KEY CLUSTERED (N) WITH FILLFACTOR = 100
+
+--Parse in batches
+SET @batch = 100000
+SET @maxID = @batch
+SET @rowsAffected = @batch
+SET @totalRows = 0
+
+WHILE @rowsAffected > 0 BEGIN
+   INSERT INTO eddsdbo.KCD_1040822_EmailAddressStaging(EmailAddress,DocumentArtifactID)
+   SELECT 
+      --removes trailing and leading spaces, tabs, carriage returns and line feeds)
+      LTRIM(RTRIM(REPLACE(REPLACE(REPLACE(Item,CHAR(9),''),CHAR(10),''),CHAR(13),'')))
+      ,DocumentArtifactID
+   FROM eddsdbo.KCD_1040822_Tally 
+      CROSS APPLY eddsdbo.KCD_1040822_SplitString(FieldValue, #delimiter#)
+   WHERE Item IS NOT NULL
+      AND N <= @maxID
+
+   --Move on to the next batch
+   SET @rowsAffected = @@ROWCOUNT
+   SET @totalRows = @totalRows + @rowsAffected
+   DELETE FROM eddsdbo.KCD_1040822_Tally WHERE N <= @maxID
+   SET @maxID = @maxID + @batch
+END
+
+--SVempati
+--set count field name for updating later
+
+   
+--Get all unique records which do not already exist in the object
+-- ACB: Sets four variables associated with the client's RDO
+SET @artifactTypeID = (SELECT FieldArtifactTypeID FROM eddsdbo.Field (NOLOCK) WHERE ArtifactID = #fieldToPopulate#)
+SET @parentArtifactID = (SELECT ArtifactID FROM eddsdbo.SystemArtifact (NOLOCK) WHERE SystemArtifactIdentifier = 'System')
+SET @artifactTypeTableName = (SELECT '[' + ArtifactType + ']' FROM eddsdbo.ArtifactType(NOLOCK) WHERE ArtifactTypeID = @artifactTypeID)
+SET @artifactTypeTableColumnName = (SELECT AF.ColumnName FROM eddsdbo.ArtifactViewField AF (NOLOCK) INNER JOIN eddsdbo.Field F (NOLOCK) ON AF.ArtifactViewFieldID = F.ArtifactViewFieldID WHERE F.ArtifactID = #fieldToPopulate#)
+SET @columnName = (SELECT '[' + AF.ColumnName + ']' FROM eddsdbo.ArtifactViewField AF (NOLOCK) INNER JOIN eddsdbo.Field F (NOLOCK) ON AF.ArtifactViewFieldID = F.ArtifactViewFieldID WHERE F.ArtifactID = #fieldToPopulate#)
+
+-- abilson@kcura.com 2 June 2017
+-- This retrieves the maximum size of the destination field in order to avoid a truncation error
+DECLARE @DestinationFieldColumnLength AS INT
+SET @DestinationFieldColumnLength = (
+  SELECT TOP 1 max_length / 2 -- for unicode it's half
+  FROM sys.columns
+  WHERE object_id = OBJECT_ID(@artifactTypeTableName)
+  AND name = @artifactTypeTableColumnName 
+  )
+
+IF NOT OBJECT_ID('eddsdbo.KCD_1040822_EmailAddressToCreate') IS NULL BEGIN DROP TABLE eddsdbo.KCD_1040822_EmailAddressToCreate END
+CREATE TABLE eddsdbo.KCD_1040822_EmailAddressToCreate
+   (
+      ID int IDENTITY(1,1),
+      EmailAddress NVARCHAR(4000)
+   )
+   
+   -- ACB: SPECIAL CONSIDERATION: If the Field To Populate which the client selects does not support Unicode, this dynamic
+   -- 							  SQL query will not match the email addresses and will potentially create duplicate items.
+   -- 							  It may also create duplicates if the field truncates the email address due to length.
+   -- 							  i.e. a fixed-length text field of 100 compared to NVARCHAR(4000).  Should be fine so long as
+   -- 							  no email address exceeds the field length.
+   
+SET @SQL = '
+INSERT INTO eddsdbo.KCD_1040822_EmailAddressToCreate(EmailAddress)
+SELECT DISTINCT K.EmailAddress 
+FROM eddsdbo.KCD_1040822_EmailAddressStaging K
+   LEFT JOIN eddsdbo.'+@artifactTypeTableName+' E ON K.EmailAddress = E.'+@columnName+'
+WHERE E.ArtifactID IS NULL
+   AND K.EmailAddress IS NOT NULL
+   AND K.EmailAddress != ''''
+'
+EXEC(@SQL)
+
+--Create table to contain the documents and associated email addresses for records that do not already exist in the "f-f" table
+IF NOT OBJECT_ID('eddsdbo.KCD_1040822_PreviousEmailAddressDocument') IS NULL BEGIN DROP TABLE eddsdbo.KCD_1040822_PreviousEmailAddressDocument END
+CREATE TABLE eddsdbo.KCD_1040822_PreviousEmailAddressDocument
+   (
+      ID int IDENTITY(1,1),
+      DocumentArtifactID int,
+      RDOArtifactID int
+   )
+   
+SET @SQL = '
+INSERT INTO eddsdbo.KCD_1040822_PreviousEmailAddressDocument(DocumentArtifactID, RDOArtifactID)
+SELECT 
+   S.DocumentArtifactID, 
+   RDO.ArtifactID
+FROM 
+   eddsdbo.KCD_1040822_EmailAddressStaging S WITH(NOLOCK)
+   INNER JOIN [EDDSDBO].'+@artifactTypeTableName+' RDO WITH(NOLOCK) ON S.EmailAddress = RDO.'+@columnName+'
+WHERE
+   S.EmailAddress NOT IN (SELECT EmailAddress FROM eddsdbo.KCD_1040822_EmailAddressToCreate WITH(NOLOCK))
+'
+EXEC(@SQL)
+
+SET @countFieldName = (SELECT AVF.[ColumnName] FROM [Field] F WITH(NOLOCK) INNER JOIN [ArtifactViewField] AVF ON F.[ArtifactViewFieldID] = AVF.[ArtifactViewFieldID] WHERE F.[ArtifactID] = @iWhole)
+
+
+--Create records in the object
+SET @batch = 100000
+SET @maxID = @batch
+SET @rowsAffected = @batch
+SET @totalRows = 0
+
+--Get columns and table for multi-object field
+--Check to see if there is only one multi-object field relating the custom object and the document object
+DECLARE @fieldCount INT
+SET @fieldCount = (SELECT COUNT(ArtifactID) FROM eddsdbo.Field (NOLOCK) WHERE FieldArtifactTypeID = @artifactTypeID AND FieldTypeID = 13 AND AssociativeArtifactTypeID = 10)
+IF NOT @fieldCount = 1 BEGIN
+   SET @result = 'You must have one and only one multiple object field relating the selected object type to the Document object.'
+   GOTO TheEnd
+END
+ELSE IF @fieldCount = 1 BEGIN
+   SET @objectFieldArtifactID = (SELECT TOP 1 ArtifactID FROM eddsdbo.Field (NOLOCK) WHERE FieldArtifactTypeID = @artifactTypeID AND FieldTypeID = 13 AND AssociativeArtifactTypeID = 10)
+   SET @objectFieldColumnName = (SELECT TOP 1 RelationalTableFieldColumnName1 FROM eddsdbo.ObjectsFieldRelation (NOLOCK) WHERE FieldArtifactId1 = @objectFieldArtifactID)
+   IF @objectFieldColumnName IS NULL BEGIN
+      SET @objectFieldColumnName = (SELECT TOP 1 RelationalTableFieldColumnName2 FROM eddsdbo.ObjectsFieldRelation (NOLOCK) WHERE FieldArtifactId2 = @objectFieldArtifactID)
+      SET @documentFieldColumnName = (SELECT TOP 1 RelationalTableFieldColumnName1 FROM eddsdbo.ObjectsFieldRelation (NOLOCK) WHERE FieldArtifactId2 = @objectFieldArtifactID)
+      SET @tableName = (SELECT RelationalTableSchemaName FROM eddsdbo.ObjectsFieldRelation (NOLOCK) WHERE FieldArtifactId2 = @objectFieldArtifactID)
+   END
+   ELSE IF NOT @objectFieldColumnName IS NULL BEGIN
+      SET @objectFieldColumnName = (SELECT TOP 1 RelationalTableFieldColumnName1 FROM eddsdbo.ObjectsFieldRelation (NOLOCK) WHERE FieldArtifactId1 = @objectFieldArtifactID)
+      SET @documentFieldColumnName = (SELECT TOP 1 RelationalTableFieldColumnName2 FROM eddsdbo.ObjectsFieldRelation (NOLOCK) WHERE FieldArtifactId1 = @objectFieldArtifactID)
+      SET @tableName = (SELECT RelationalTableSchemaName FROM eddsdbo.ObjectsFieldRelation (NOLOCK) WHERE FieldArtifactId1 = @objectFieldArtifactID)
+   END
+
+
+  -- abilson@kcura.com June 1 2017
+  -- This catches all email addresses that are greater than the standard size of the Artifact's TextIdentifier field and removes them from execution.  Later, these will be listed to the end user
+  IF OBJECT_ID('eddsdbo.KCD_1040822_SkippedDocuments') IS NOT NULL BEGIN DROP TABLE eddsdbo.KCD_1040822_SkippedDocuments END
+
+  CREATE TABLE eddsdbo.KCD_1040822_SkippedDocuments
+   (
+      EmailAddress NVARCHAR(4000)
+      ,DocumentArtifactID INT
+      ,EmailAddressLength INT
+   )
+
+  INSERT INTO eddsdbo.[KCD_1040822_SkippedDocuments] 
+  SELECT [EmailAddress],[DocumentArtifactID], LEN([EmailAddress]) AS 'EmailAddressLength'
+  FROM eddsdbo.KCD_1040822_EmailAddressStaging
+  WHERE LEN([EmailAddress]) > @DestinationFieldColumnLength
+
+  DELETE FROM eddsdbo.KCD_1040822_EmailAddressStaging
+  WHERE [DocumentArtifactID] IN (SELECT [DocumentArtifactID] FROM eddsdbo.[KCD_1040822_SkippedDocuments])
+
+  DELETE FROM [EDDSDBO].[KCD_1040822_EmailAddressToCreate]
+  WHERE [EmailAddress] IN (SELECT [EmailAddress] FROM [EDDSDBO].[KCD_1040822_SkippedDocuments] WITH (NOLOCK))
+
+
+   WHILE @rowsAffected > 0 BEGIN
+      BEGIN TRANSACTION
+         BEGIN TRY
+            --Create artifact records and output the new artifactIDs
+            IF OBJECT_ID('eddsdbo.KCD_1040822_OutputArtifactIDs') IS NOT NULL BEGIN DROP TABLE eddsdbo.KCD_1040822_OutputArtifactIDs END
+            CREATE TABLE eddsdbo.KCD_1040822_OutputArtifactIDs (ID int,EmailAddress NVARCHAR(4000))
+            INSERT INTO Artifact(ArtifactTypeID, ParentArtifactID, AccessControlListID, AccessControlListIsInherited, CreatedOn, LastModifiedOn, LastModifiedBy, CreatedBy, ContainerID, Keywords, Notes, DeleteFlag, TextIdentifier)
+            OUTPUT Inserted.ArtifactID, Inserted.TextIdentifier into eddsdbo.KCD_1040822_OutputArtifactIDs
+            SELECT 
+               @artifactTypeID
+               ,@parentArtifactID
+               ,1,1,GETUTCDATE()
+               ,GETUTCDATE()
+               ,9
+               ,9
+               ,@parentArtifactID
+               ,''
+               ,''
+               ,0
+               ,EmailAddress
+            FROM eddsdbo.KCD_1040822_EmailAddressToCreate
+            WHERE ID <= @maxID
+            
+            --Create artifactAncestry records for new artifactIDs
+            INSERT INTO ArtifactAncestry(ArtifactID, AncestorArtifactID)
+            SELECT 
+               ID
+               ,@parentArtifactID
+            FROM eddsdbo.KCD_1040822_OutputArtifactIDs
+            
+            SET @SQL = '
+            --Create object records for new artifactIDs
+            INSERT INTO eddsdbo.'+@artifactTypeTableName+'(ArtifactID,'+@columnName+')
+            SELECT
+               ID
+               ,EmailAddress
+            FROM eddsdbo.KCD_1040822_OutputArtifactIDs
+            '
+            EXEC(@SQL)
+            
+            SET @rowsAffected = @@ROWCOUNT
+            SET @totalRows = @totalRows + @rowsAffected
+            
+            --Create multi-object relationship records
+            SET @SQL = '
+            INSERT INTO '+@tableName+'('+@documentFieldColumnName+','+@objectFieldColumnName+')
+            SELECT DISTINCT
+               D.DocumentArtifactID
+               ,O.ID
+            FROM eddsdbo.KCD_1040822_OutputArtifactIDs O
+               INNER JOIN eddsdbo.KCD_1040822_EmailAddressStaging D ON O.EmailAddress = D.EmailAddress
+            '
+            EXEC(@SQL)
+         END TRY
+         BEGIN CATCH
+            IF @@TRANCOUNT > 0 
+            ROLLBACK TRANSACTION
+            SET @result = 'Error on line ' + CAST(ERROR_LINE() AS VARCHAR) + ' Message: ' +  ERROR_MESSAGE()
+            GOTO TheEnd
+         END CATCH
+      IF @@TRANCOUNT > 0
+      COMMIT TRANSACTION
+      
+      DELETE FROM eddsdbo.KCD_1040822_EmailAddressToCreate WHERE ID <= @maxID
+      SET @maxID = @maxID + @batch
+   END
+
+   --Update the Document to RDO relationship for documents within the saved search for RDO records that already existed - EVN 5/4/15
+   SET @rowsAffected = @batch
+   SET @maxID = @batch
+   
+   IF OBJECT_ID('eddsdbo.KCD_1040822_OutputEmailRDOArtifactIDs') IS NOT NULL BEGIN DROP TABLE eddsdbo.KCD_1040822_OutputEmailRDOArtifactIDs END
+   CREATE TABLE eddsdbo.KCD_1040822_OutputEmailRDOArtifactIDs (ID int IDENTITY(1,1), RDOArtifactID int)
+
+   WHILE @rowsAffected > 0 BEGIN
+      BEGIN TRANSACTION
+         BEGIN TRY
+            --Insert the new Email Address RDO-Document records that were not added before, this is the new stuff
+            SET @SQL = '
+            INSERT INTO [eddsdbo].['+@tableName+'] ('+@objectFieldColumnName+', '+@documentFieldColumnName+')
+            OUTPUT Inserted.'+@objectFieldColumnName+' INTO eddsdbo.KCD_1040822_OutputEmailRDOArtifactIDs
+            SELECT
+               DISTINCT P.RDOArtifactID,
+               P.DocumentArtifactID
+            FROM [EDDSDBO].[KCD_1040822_PreviousEmailAddressDocument] P
+            LEFT OUTER JOIN EDDSDBO.['+@tableName+'] FF
+              ON (P.RDOArtifactID = FF.'+@objectFieldColumnName+' AND P.DocumentArtifactID = FF.'+@documentFieldColumnName+')
+            WHERE 
+               FF.'+@objectFieldColumnName+' IS NULL
+               AND FF.'+@documentFieldColumnName+' IS NULL
+               AND P.ID <= ' + CONVERT(VARCHAR(20), @maxID)
+
+            EXEC(@SQL)
+            
+            SET @rowsAffected = @@ROWCOUNT
+         END TRY
+         BEGIN CATCH
+            IF @@TRANCOUNT > 0 
+            ROLLBACK TRANSACTION
+            SET @result = 'Error on line ' + CAST(ERROR_LINE() AS VARCHAR) + ' Message: ' +  ERROR_MESSAGE()
+            GOTO TheEnd
+         END CATCH
+      IF @@TRANCOUNT > 0
+      COMMIT TRANSACTION
+      
+      DELETE FROM [EDDSDBO].[KCD_1040822_PreviousEmailAddressDocument] WHERE ID <= @maxID
+
+      SET @maxID = @maxID + @batch
+   END
+   
+   --Update all counts
+   IF @PopulateCount = 1
+   BEGIN
+      EXEC('
+         UPDATE T1
+         SET T1.['+@countFieldName+'] = (SELECT COUNT('+@documentFieldColumnName+') FROM '+@tableName+' T2 where T2.'+@objectFieldColumnName+' = T1.[ArtifactID])
+         FROM eddsdbo.'+@artifactTypeTableName+' T1')
+   END
+   
+   DECLARE @updateRecordCount INT
+   SELECT @updateRecordCount = COUNT (DISTINCT RDOArtifactID) FROM eddsdbo.KCD_1040822_OutputEmailRDOArtifactIDs WITH(NOLOCK)
+   
+   SET @result = CAST(@totalRows AS VARCHAR) + ' Records Created, ' + CAST(@updateRecordCount AS VARCHAR) + ' Records Updated'
+   GOTO TheEnd
+END
+
+TheEnd:
+   DECLARE @SkippedDocumentIDs AS VARCHAR(MAX)
+   IF (SELECT COUNT(0) FROM eddsdbo.KCD_1040822_SkippedDocuments) > 0 BEGIN
+    SELECT @SkippedDocumentIDs = COALESCE(@SkippedDocumentIDs+',','') + CAST([DocumentArtifactID] AS VARCHAR(50)) FROM eddsdbo.KCD_1040822_SkippedDocuments
+   END
+   SELECT @result [Result], @SkippedDocumentIDs [Skipped Document IDs], @DestinationFieldColumnLength [Allowed Length of Destination Field]
+  
+Error:
+   SELECT 'Please make sure that Field to Populate and Count Field are both part of the same object.' AS [ERROR]
+
+   ]]></action>
+</script>
