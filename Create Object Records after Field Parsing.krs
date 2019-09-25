@@ -1,6 +1,6 @@
 <script>
 	<name>Create Object Records after Field Parsing</name>
-	<version>4.4</version>
+	<version>4.5</version>
 	<description>This Relativity workspace script will take one or many document text fields which contain a delimited list of values and create unique records in a custom object which are created are associated to the documents.  Also reports any documents with email addresses that exceed the character limit for the destination field and skips them. KCD_1040822</description>
 	<category>Case Functionality</category>
 	<input>
@@ -184,6 +184,17 @@ DECLARE @objectFieldColumnName NVARCHAR(128)
 DECLARE @documentFieldColumnName NVARCHAR(128)
 DECLARE @countFieldName NVARCHAR(255)
 DECLARE @result VARCHAR(MAX)
+
+-- abilson@kcura.com June 1 2017
+-- This catches all email addresses that are greater than the standard size of the Artifact's TextIdentifier field and removes them from execution.  Later, these will be listed to the end user
+IF OBJECT_ID('eddsdbo.KCD_1040822_SkippedDocuments') IS NOT NULL BEGIN DROP TABLE eddsdbo.KCD_1040822_SkippedDocuments END
+
+CREATE TABLE eddsdbo.KCD_1040822_SkippedDocuments
+(
+  EmailAddress NVARCHAR(4000)
+  ,DocumentArtifactID INT
+  ,EmailAddressLength INT
+)
 
 --Get all documents in the saved search 
 IF NOT OBJECT_ID('eddsdbo.KCD_1040822_Documents') IS NULL BEGIN DROP TABLE eddsdbo.KCD_1040822_Documents END
@@ -375,18 +386,6 @@ ELSE IF @fieldCount = 1 BEGIN
       SET @documentFieldColumnName = (SELECT TOP 1 RelationalTableFieldColumnName2 FROM eddsdbo.ObjectsFieldRelation (NOLOCK) WHERE FieldArtifactId1 = @objectFieldArtifactID)
       SET @tableName = (SELECT RelationalTableSchemaName FROM eddsdbo.ObjectsFieldRelation (NOLOCK) WHERE FieldArtifactId1 = @objectFieldArtifactID)
    END
-
-
-  -- abilson@kcura.com June 1 2017
-  -- This catches all email addresses that are greater than the standard size of the Artifact's TextIdentifier field and removes them from execution.  Later, these will be listed to the end user
-  IF OBJECT_ID('eddsdbo.KCD_1040822_SkippedDocuments') IS NOT NULL BEGIN DROP TABLE eddsdbo.KCD_1040822_SkippedDocuments END
-
-  CREATE TABLE eddsdbo.KCD_1040822_SkippedDocuments
-   (
-      EmailAddress NVARCHAR(4000)
-      ,DocumentArtifactID INT
-      ,EmailAddressLength INT
-   )
 
   INSERT INTO eddsdbo.[KCD_1040822_SkippedDocuments] 
   SELECT [EmailAddress],[DocumentArtifactID], LEN([EmailAddress]) AS 'EmailAddressLength'
